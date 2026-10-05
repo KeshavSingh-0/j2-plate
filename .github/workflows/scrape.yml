@@ -1,1 +1,39 @@
+name: Update J2 menu
 
+on:
+  schedule:
+    - cron: "0 9 * * *"    # about 4 am Austin time, every day
+    - cron: "0 17 * * *"   # about noon, catches same-day menu changes
+  workflow_dispatch:        # lets you run it by hand from the Actions tab
+    inputs:
+      debug:
+        description: "Save raw pages for troubleshooting"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests
+      - run: python scrape.py ${{ inputs.debug && '--debug' || '' }}
+      - name: Save debug pages
+        if: ${{ always() && inputs.debug }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-pages
+          path: debug/
+      - name: Commit updated menu
+        run: |
+          git config user.name "menu-bot"
+          git config user.email "menu-bot@users.noreply.github.com"
+          git add data/
+          git diff --cached --quiet || git commit -m "Update J2 menu $(date -u +%F)"
+          git push
