@@ -5,9 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-title" content="J2 Plate">
+<meta name="apple-mobile-web-app-title" content="UT Plate">
 <meta name="theme-color" content="#1D2B2F">
-<title>J2 Plate</title>
+<title>UT Plate</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍽️</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -82,6 +82,8 @@ ul.plate li{display:grid;grid-template-columns:auto 1fr auto;gap:10px;align-item
 .add{margin-top:10px;width:100%;padding:9px;border-radius:10px;border:1px solid var(--line);background:var(--paper)}
 .links{display:flex;gap:18px;margin-top:10px}
 .links button{border:0;background:none;padding:4px 0;color:var(--muted);font-size:14px;font-weight:600;text-decoration:underline;text-underline-offset:3px}
+.hall{margin-top:8px;width:100%;padding:8px;border-radius:10px;border:1.5px solid var(--ink);background:var(--card);font-weight:600}
+.hallname{margin:4px 0 0;font-size:14px;color:var(--muted)}
 .note{font-size:14px;color:var(--muted);margin:8px 0 0}
 .warn{background:var(--orange-soft);border-radius:10px;padding:10px 12px;font-size:14px;margin:0 0 14px}
 
@@ -105,8 +107,8 @@ footer{color:var(--muted);font-size:13px;text-align:center;padding:8px 16px}
 <body>
 <main>
   <header>
-    <h1>J2 Plate</h1>
-    <p class="sub" id="sub">Loading today's menu…</p>
+    <h1>UT Plate</h1>
+    <p class="sub" id="sub">Loading today's menus…</p>
   </header>
   <nav class="days" id="days" aria-label="Menu days"></nav>
   <div id="app"></div>
@@ -126,7 +128,7 @@ const MEAL_ORDER = ["Breakfast", "Brunch", "Lunch", "Dinner"];
 function load(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } }
 function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
 const DEFAULT_SETTINGS = {
-  start: "2026-10-05", noEggs: true,
+  start: "2026-10-05", noEggs: true, halls: {}, sheetUrl: "", sheetToken: "",
   shares: { Breakfast: 0.25, Brunch: 0.4, Lunch: 0.35, Dinner: 0.4 },
   extras: [
     { name: "Whey shake (1 scoop)", on: true, n: [120,1.5,1,0,30,100,3,0,2,1,24,0,120,0.3,150] },
@@ -138,6 +140,8 @@ let hidden = new Set(load("j2.hidden", []));
 let plates = load("j2.plates", {});   // {date: {meal: {plate:[{id,qty}], ate:bool}}}
 let seeds = {};                        // swap seed per date|meal (session only)
 let data = null, day = null;
+const ui = {};                         // which panels are open, kept across re-renders
+document.addEventListener("toggle", ev => { const k = ev.target.dataset?.ui; if (k) ui[k] = ev.target.open; }, true);
 
 const store = () => { save("j2.settings", settings); save("j2.hidden", [...hidden]); save("j2.plates", plates); };
 const todayISO = () => { const d = new Date(); return new Date(d - d.getTimezoneOffset() * 6e4).toISOString().slice(0, 10); };
@@ -145,9 +149,9 @@ function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.ad
 
 // ---------- planning ----------
 function plan() {
-  const menu = data.days[day] || {};
+  const halls = data.days[day] || {};             // {hall: {meal: [entries]}}
   const rank = m => { const i = MEAL_ORDER.indexOf(m); return i < 0 ? 99 : i; };
-  const meals = Object.keys(menu).sort((a, b) => rank(a) - rank(b));
+  const meals = [...new Set(Object.values(halls).flatMap(h => Object.keys(h)))].sort((a, b) => rank(a) - rank(b));
   const target = P.dailyTarget(day, settings.start);
   const saved = plates[day] || {};
   const fixed = P.zero(), eaten = P.zero();
@@ -161,17 +165,54 @@ function plan() {
   const mt = P.mealTargets(target, fixed, auto, shares);
   const out = [];
   for (const m of meals) {
+    const served = Object.keys(halls).filter(h => halls[h][m]?.length);
+    const pref = settings.halls[m] || "best";
     if (saved[m]?.skip) { out.push({ meal: m, skipped: true }); continue; }
-    if (saved[m]) { out.push({ meal: m, plate: saved[m].plate, ate: !!saved[m].ate, custom: !saved[m].ate, total: P.sumPlate(saved[m].plate, data.items) }); continue; }
-    const key = day + "|" + m, s = seeds[key] || { seed: 1, avoid: new Set() };
-    const cands = P.candidates(menu[m], data.items, { noEggs: settings.noEggs, hidden, seed: s.seed, avoid: s.avoid });
-    const r = P.optimize(cands, mt[m]);
-    out.push({ meal: m, plate: r.plate, total: r.total, target: mt[m] });
+    if (saved[m]) {
+      out.push({ meal: m, plate: saved[m].plate, ate: !!saved[m].ate, custom: !saved[m].ate, hall: saved[m].hall || served[0],
+                 served, pref, total: P.sumPlate(saved[m].plate, data.items) });
+      continue;
+    }
+    const tryHalls = pref !== "best" && served.includes(pref) ? [pref] : served;
+    let best = null;
+    for (const h of tryHalls) {
+      const key = day + "|" + m + "|" + h, s = seeds[key] || { seed: 1, avoid: new Set() };
+      const cands = P.candidates(halls[h][m], data.items, { noEggs: settings.noEggs, hidden, seed: s.seed, avoid: s.avoid });
+      const r = P.optimize(cands, mt[m]);
+      if (!best || r.score < best.score) best = { ...r, hall: h };
+    }
+    out.push({ meal: m, plate: best.plate, total: best.total, hall: best.hall, served, pref, target: mt[m] });
   }
   const planned = P.zero();
   P.addInto(planned, fixed, 1);
   out.forEach(o => { if (!o.skipped && !plates[day]?.[o.meal]) P.addInto(planned, o.total, 1); });
-  return { meals: out, target, eaten, planned, menu };
+  return { meals: out, target, eaten, planned, menu: halls };
+}
+
+// ---------- Google Sheet link ----------
+const sheetMeal = m => (m === "Brunch" ? "Lunch" : m);
+const round15 = t => t.map(v => Math.round(v * 10) / 10);
+function snacksRow() {
+  const on = settings.extras.filter(x => x.on);
+  if (!on.length) return { date: day, meal: "Snacks", values: null };
+  const t = P.zero(); on.forEach(x => P.addInto(t, x.n, 1));
+  return { date: day, meal: "Snacks", values: round15(t) };
+}
+async function sendToSheet(rows, quiet) {
+  if (!settings.sheetUrl) return;
+  const body = JSON.stringify({ token: settings.sheetToken || "", rows });
+  const headers = { "Content-Type": "text/plain;charset=utf-8" };
+  try {
+    const r = await fetch(settings.sheetUrl, { method: "POST", body, headers });
+    const j = await r.json();
+    if (!j.ok) { toast("Sheet: " + (j.error || "not saved")); return; }
+    const miss = (j.results || []).filter(x => !x.ok);
+    if (miss.length) toast("Sheet: " + miss[0].error); else if (!quiet) toast(rows.length ? "Saved to your sheet" : "Sheet link works");
+  } catch {
+    // Some browsers can't read Google's reply; send again without reading it (writes are safe to repeat).
+    try { await fetch(settings.sheetUrl, { method: "POST", mode: "no-cors", body, headers }); if (!quiet) toast("Sent to your sheet"); }
+    catch { toast("Couldn't reach your sheet. Check the link in Settings."); }
+  }
 }
 
 // ---------- rendering ----------
@@ -208,25 +249,29 @@ function render() {
     <div class="nut">${METER.map(i => meterRow(i, p.planned[i], p.target[i])).join("")}</div></div>`;
 
   if (p.planned[10] < p.target[10] * 0.9)
-    html += `<p class="warn">Today's vegetarian options leave you about ${Math.round(p.target[10] - p.planned[10])} g short on protein. Turn on another shake or snack below, or add Greek yogurt or edamame to a meal.</p>`;
+    html += `<p class="warn">Today's vegetarian options leave you about ${Math.round(p.target[10] - p.planned[10])} g short on protein. Turn on another shake or snack below, try a different hall, or add Greek yogurt or edamame to a meal.</p>`;
   if (!Object.keys(p.menu).length)
     html += `<p class="warn">No menu posted for this day yet.</p>`;
 
   for (const m of p.meals) {
-    if (m.skipped) { html += `<section class="meal"><div class="mealhead"><h2>${esc(m.meal)}</h2><button class="btn quiet" data-act="unskip" data-meal="${esc(m.meal)}">Plan this meal</button></div><p class="note">Not eating at J2.</p></section>`; continue; }
+    if (m.skipped) { html += `<section class="meal"><div class="mealhead"><h2>${esc(m.meal)}</h2><button class="btn quiet" data-act="unskip" data-meal="${esc(m.meal)}">Plan this meal</button></div><p class="note">Not eating at a dining hall.</p></section>`; continue; }
     const tag = m.ate ? `<span class="state ate">Eaten</span>` : m.custom ? `<span class="state edit">Edited</span>` : "";
     html += `<section class="meal" data-meal="${esc(m.meal)}"><div class="mealhead"><h2>${esc(m.meal)}${tag}</h2>
       <span class="mealtot">${Math.round(m.total[0])} kcal, ${Math.round(m.total[10])} g protein</span></div>`;
+    if (m.ate || m.custom) html += `<p class="hallname">At ${esc(m.hall)}</p>`;
+    else html += `<select class="hall" data-act="hall" aria-label="Dining hall for ${esc(m.meal)}">
+      <option value="best" ${m.pref === "best" || !m.served.includes(m.pref) ? "selected" : ""}>Best match: ${esc(m.hall)}</option>
+      ${m.served.map(h => `<option value="${esc(h)}" ${m.pref === h && m.served.includes(h) ? "selected" : ""}>${esc(h)}</option>`).join("")}</select>`;
     if (!m.plate.length) html += `<p class="note">Nothing needed here; you're already on target.</p>`;
     html += `<ul class="plate">` + m.plate.map(x => {
       const it = data.items[x.id] || { name: "Unknown item", serving: "", n: P.zero() };
-      const st = (p.menu[m.meal] || []).find(e => e.id === x.id)?.station || "";
+      const st = (p.menu[m.hall]?.[m.meal] || []).find(e => e.id === x.id)?.station || "";
       return `<li><span class="qty">${x.qty}×</span><div><div class="name">${esc(it.name)}</div>
         <div class="meta">${esc(it.serving || "1 serving")} each${st ? ", " + esc(st) : ""}. ${Math.round(it.n[0] * x.qty)} kcal, ${(it.n[10] * x.qty).toFixed(0)} g protein</div></div>
         ${m.ate ? "" : `<div class="ctrls"><button aria-label="One less ${esc(it.name)}" data-act="minus" data-id="${esc(x.id)}">−</button><button aria-label="One more ${esc(it.name)}" data-act="plus" data-id="${esc(x.id)}">+</button><button aria-label="Never suggest ${esc(it.name)}" data-act="hide" data-id="${esc(x.id)}">×</button></div>`}</li>`;
     }).join("") + `</ul>`;
     if (!m.ate) {
-      const ids = [...new Set((p.menu[m.meal] || []).map(e => e.id))].filter(id => data.items[id] && P.candidates([{ id }], data.items, { noEggs: settings.noEggs }).length);
+      const ids = [...new Set((p.menu[m.hall]?.[m.meal] || []).map(e => e.id))].filter(id => data.items[id] && P.candidates([{ id }], data.items, { noEggs: settings.noEggs }).length);
       html += `<select class="add" data-act="add" aria-label="Add a dish to ${esc(m.meal)}"><option value="">Add a dish…</option>${
         ids.map(id => `<option value="${esc(id)}">${esc(data.items[id].name)} (${Math.round(data.items[id].n[0])} kcal, ${data.items[id].n[10].toFixed(0)} g P)</option>`).join("")}</select>`;
     }
@@ -237,10 +282,10 @@ function render() {
       + `</div><div class="links">${m.ate ? "" : `<button data-act="skip">Not eating here</button>`}<button data-act="copy">Copy for sheet</button></div></section>`;
   }
 
-  html += `<section class="panel"><h2>Outside J2 today</h2>${settings.extras.map((x, i) => `
+  html += `<section class="panel"><h2>Outside the dining halls today</h2>${settings.extras.map((x, i) => `
     <label class="check"><span>${esc(x.name)}<br><span class="meta">${x.n[0]} kcal, ${x.n[10]} g protein</span></span>
     <input type="checkbox" data-act="extra" data-i="${i}" ${x.on ? "checked" : ""}></label>`).join("")}
-    <details style="margin-top:8px"><summary style="font-size:16px">Add your own food</summary>
+    <details style="margin-top:8px" data-ui="food" ${ui.food ? "open" : ""}><summary style="font-size:16px">Add your own food</summary>
       <label class="field">Name<input id="xn" placeholder="e.g. Protein bar"></label>
       <div class="grid3"><label class="field">kcal<input id="xc" inputmode="decimal"></label>
       <label class="field">Protein g<input id="xp" inputmode="decimal"></label><label class="field">Fat g<input id="xf" inputmode="decimal"></label>
@@ -248,27 +293,31 @@ function render() {
       <label class="field">Sodium mg<input id="xs" inputmode="decimal"></label></div>
       <div class="actions"><button class="btn" data-act="addextra">Save food</button></div></details></section>`;
 
-  html += `<details class="panel"><summary>Settings</summary>
+  html += `<details class="panel" data-ui="settings" ${ui.settings ? "open" : ""}><summary>Settings</summary>
     <label class="check"><span>Skip dishes with eggs</span><input type="checkbox" data-act="eggs" ${settings.noEggs ? "checked" : ""}></label>
     <label class="field">Plan start date (week 1)<input type="date" data-act="start" value="${settings.start}"></label>
     <p class="note">Targets follow your 12-week plan: 2,600 kcal in weeks 1–2 and 9, 2,350 kcal otherwise, with 140–145 g protein.</p>
+    <label class="field">Google Sheet link (from the Apps Script deployment)<input type="url" data-act="sheetUrl" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(settings.sheetUrl)}"></label>
+    <label class="field">Sheet password (the TOKEN in the script)<input data-act="sheetToken" value="${esc(settings.sheetToken)}" autocomplete="off"></label>
+    ${settings.sheetUrl ? `<div class="actions"><button class="btn" data-act="testsheet">Test link</button><button class="btn" data-act="syncday">Send this day</button></div>
+    <p class="note">Meals you mark eaten fill your Food tab automatically. Undo clears the row. Food outside the halls goes to the Snacks row.</p>` : `<p class="note">Add the link to fill your Food tab automatically when you mark meals eaten.</p>`}
     ${hidden.size ? `<p class="note">${hidden.size} dish${hidden.size > 1 ? "es" : ""} hidden. <button class="btn quiet" data-act="unhide">Show them again</button></p>` : ""}
     </details>`;
   $("#app").innerHTML = html;
-  $("#foot").textContent = `Menu updated ${new Date(data.updated).toLocaleString()}. Nutrition is UT Dining's estimate.`;
+  $("#foot").textContent = `Menus updated ${new Date(data.updated).toLocaleString()}. Nutrition is UT Dining's estimate.`;
 }
 
 // ---------- actions ----------
 function current(meal) {
   const p = plan(); return p.meals.find(m => m.meal === meal);
 }
-function setPlate(meal, plate, ate = false) {
+function setPlate(meal, plate, ate = false, hall) {
   plates[day] = plates[day] || {};
-  plates[day][meal] = { plate: plate.filter(x => x.qty > 0), ate };
+  plates[day][meal] = { plate: plate.filter(x => x.qty > 0), ate, hall: hall || current(meal)?.hall };
   store(); render();
 }
 document.addEventListener("click", ev => {
-  const b = ev.target.closest("[data-act]"); if (!b || b.tagName === "SELECT") return;
+  const b = ev.target.closest("[data-act]"); if (!b || ["SELECT", "INPUT"].includes(b.tagName)) return;
   if (b.dataset.day) return;
   const meal = b.closest("[data-meal]")?.dataset.meal || b.dataset.meal;
   const act = b.dataset.act, id = b.dataset.id;
@@ -280,11 +329,24 @@ document.addEventListener("click", ev => {
     hidden.add(id);
     if (plates[day]?.[meal]) plates[day][meal].plate = plates[day][meal].plate.filter(x => x.id !== id);
     store(); render(); toast("Won't suggest that again");
-  } else if (act === "ate") { setPlate(meal, current(meal).plate, true); toast(`${meal} logged`); }
-  else if (act === "undo" || act === "reset") { delete plates[day][meal]; store(); render(); }
+  } else if (act === "ate") {
+    const c = current(meal);
+    setPlate(meal, c.plate, true, c.hall); toast(`${meal} logged`);
+    sendToSheet([{ date: day, meal: sheetMeal(meal), values: round15(c.total) }, snacksRow()]);
+  }
+  else if (act === "undo" || act === "reset") {
+    const wasEaten = plates[day][meal]?.ate;
+    delete plates[day][meal]; store(); render();
+    if (act === "undo" && wasEaten) sendToSheet([{ date: day, meal: sheetMeal(meal), values: null }]);
+  }
+  else if (act === "testsheet") sendToSheet([]);
+  else if (act === "syncday") {
+    const rows = plan().meals.filter(m => m.ate).map(m => ({ date: day, meal: sheetMeal(m.meal), values: round15(m.total) }));
+    sendToSheet([...rows, snacksRow()]);
+  }
   else if (act === "swap") {
-    const key = day + "|" + meal, s = seeds[key] || { seed: 1, avoid: new Set() };
-    current(meal).plate.forEach(x => s.avoid.add(x.id));
+    const c = current(meal), key = day + "|" + meal + "|" + c.hall, s = seeds[key] || { seed: 1, avoid: new Set() };
+    c.plate.forEach(x => s.avoid.add(x.id));
     s.seed += 1; seeds[key] = s; render();
   } else if (act === "skip") { plates[day] = plates[day] || {}; plates[day][meal] = { plate: [], skip: true }; store(); render(); }
   else if (act === "unskip") { delete plates[day][meal]; store(); render(); }
@@ -301,7 +363,10 @@ document.addEventListener("click", ev => {
 });
 document.addEventListener("change", ev => {
   const el = ev.target, act = el.dataset.act;
-  if (act === "extra") { settings.extras[+el.dataset.i].on = el.checked; store(); render(); }
+  if (act === "extra") { settings.extras[+el.dataset.i].on = el.checked; store(); render(); sendToSheet([snacksRow()], true); }
+  else if (act === "hall") { settings.halls[el.closest("[data-meal]").dataset.meal] = el.value; store(); render(); }
+  else if (act === "sheetUrl") { settings.sheetUrl = el.value.trim(); store(); render(); }
+  else if (act === "sheetToken") { settings.sheetToken = el.value.trim(); store(); }
   else if (act === "eggs") { settings.noEggs = el.checked; store(); render(); }
   else if (act === "start" && el.value) { settings.start = el.value; store(); render(); }
   else if (act === "add" && el.value) {
@@ -326,7 +391,7 @@ fetch("data/menu.json?v=" + Date.now()).then(r => { if (!r.ok) throw new Error(r
   renderDays(); render();
 }).catch(() => {
   $("#sub").textContent = "No menu data yet.";
-  $("#app").innerHTML = `<p class="warn">The menu file hasn't been built. On GitHub, open this repo's Actions tab, choose "Update J2 menu", and press "Run workflow". Then reload this page.</p>`;
+  $("#app").innerHTML = `<p class="warn">The menu file hasn't been built. On GitHub, open this repo's Actions tab, choose "Update dining menus", and press "Run workflow". Then reload this page.</p>`;
 });
 </script>
 </body>

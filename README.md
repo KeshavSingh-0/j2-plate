@@ -1,39 +1,64 @@
-# J2 Plate
+# UT Plate
 
-A phone app that reads the J2 Dining menu every day and tells you what to eat, and how many portions, to hit your daily targets.
+UT Plate is a phone app. It reads the J2, JCL and Kins Dining menus every day and tells you what to eat, and how many portions, to hit your daily targets. It can also fill in your Google Sheet when you mark a meal as eaten.
 
-It has three parts:
+The project has four parts:
 
-- `scrape.py` pulls the J2 menus and nutrition labels from UT FoodPro. It keeps only vegetarian and vegan dishes.
-- A GitHub Action runs that script twice a day and saves the result to `data/menu.json`.
-- `index.html` and `planner.js` form the app. It loads the menu file and works out portions for each meal. GitHub Pages hosts it for free.
+| File | What it does |
+| --- | --- |
+| `scrape.py` | Pulls the menus and nutrition labels for all three halls from UT FoodPro, keeping only vegetarian and vegan dishes |
+| `.github/workflows/scrape.yml` | A GitHub Action that runs the scraper twice a day and saves `data/menu.json` |
+| `index.html`, `planner.js` | The app itself, hosted free on GitHub Pages |
+| `sheet-sync.gs` | An optional Google Apps Script that writes eaten meals into your sheet's Food tab |
 
 ## Setup (about 10 minutes, on a laptop)
 
-1. Create a **public** repository on GitHub named `j2-plate`.
-2. Upload the files with **Add file → Upload files**: `index.html`, `planner.js`, `scrape.py`, `README.md`, `.nojekyll`, and the `data` folder.
-3. Add the workflow with **Add file → Create new file**. Name it `.github/workflows/scrape.yml` and paste in the contents of that file from this folder. (Mac Finder hides folders that start with a dot, so drag-and-drop often skips them.)
-4. Give the Action permission to save the menu. Go to **Settings → Actions → General → Workflow permissions**, choose **Read and write permissions**, and press Save.
-5. Run the first menu update. Go to **Actions → Update J2 menu → Run workflow**. Wait for the green check, about 2–4 minutes. A file named `data/menu.json` should now exist in the repo.
-6. Turn on hosting. Go to **Settings → Pages** and set Source to **Deploy from a branch**, branch `main`, folder `/ (root)`. After a minute your app is live at `https://YOUR-USERNAME.github.io/j2-plate/`.
-7. Open that link in Safari on your iPhone. Tap **Share → Add to Home Screen**.
+1. Create a **public** GitHub repository, for example `ut-plate`.
+2. Upload these files with **Add file → Upload files**: `index.html`, `planner.js`, `scrape.py`, `README.md`, `.nojekyll`, and the `data` folder.
+3. Add the workflow with **Add file → Create new file**. Name it `.github/workflows/scrape.yml` and paste in that file's contents. (Mac Finder hides folders that start with a dot.)
+4. Go to **Settings → Actions → General → Workflow permissions**, choose **Read and write permissions**, and press Save.
+5. Go to **Actions → Update dining menus → Run workflow**. The first run takes about 5–8 minutes because it reads every label once. Later runs are faster.
+6. Go to **Settings → Pages** and set Source to **Deploy from a branch**, `main`, `/ (root)`. Your app will be at `https://YOUR-USERNAME.github.io/ut-plate/`.
+7. Open that link in Safari on your phone and tap **Share → Add to Home Screen**.
 
-## Using it
+## Link your Google Sheet (optional)
 
-- Each meal shows a suggested plate, such as **2× Seasoned Lentils (3 oz each)**.
-- **I ate this** logs the meal. The meals you haven't eaten yet are then re-planned around what's left of the day's target.
-- **Another option** suggests a different plate.
-- **+ / −** change portions. **×** hides a dish permanently. **Add a dish** logs something the planner didn't suggest.
-- **Not eating here** skips that meal. The remaining meals then cover the rest of the day.
-- **Outside J2 today** holds things like your whey shake, so the planner counts them. You can add your own foods.
-- **Copy for sheet** copies the meal's 15 totals. Paste them into column B of that meal's row in your Food tab.
+Your sheet needs a tab named **Food** laid out like your mastersheet. Each date goes in column A, with Breakfast, Lunch, Dinner and Snacks rows below it and the 15 nutrient columns in B–P. If you upload `Keshav_MASTERSHEET.xlsx` to Google Drive and open it with Google Sheets, it already matches.
 
-Targets follow the 12-week plan: 2,600 kcal in weeks 1–2 and 9, and 2,350 kcal otherwise. You can change the plan start date in Settings. Your logs are saved on your phone only.
+1. In the Google Sheet, open **Extensions → Apps Script**.
+2. Delete what's there, paste in `sheet-sync.gs`, and change `TOKEN` to a password of your own.
+3. Optional check: choose `testWrite` from the function menu and press **Run**. Allow access when asked. The log should say `"ok":true`.
+4. Click **Deploy → New deployment**. Pick type **Web app**, set **Execute as: Me** and **Who has access: Anyone**, and press Deploy. Copy the **Web app URL**, which ends in `/exec`.
+5. In the app, open **Settings**. Paste the URL into **Google Sheet link** and your TOKEN into **Sheet password**, then tap **Test link**.
+
+From then on, the app updates your sheet like this:
+
+| In the app | In your Food tab |
+| --- | --- |
+| **I ate this** | Writes that meal's 15 totals into the meal's row under today's date |
+| **Undo eaten** | Clears that row |
+| Turning foods on or off under **Outside the dining halls** | Writes their total into the Snacks row |
+| **Send this day** (in Settings) | Re-sends every eaten meal for the day |
+
+Brunch goes into the Lunch row.
+
+If you edit the script later, use **Deploy → Manage deployments → Edit → New version** so the URL stays the same.
+
+## Using the app
+
+- Each meal has a hall picker.
+    - **Best match** compares J2, JCL and Kins and picks the hall whose menu gets closest to your targets.
+    - You can also pick the hall you're actually walking to.
+- **I ate this** logs the meal. The meals left in the day are re-planned around whatever is still needed.
+- **Another option** gives a different plate.
+- **+ / −** change portions, and **×** hides a dish for good.
+- **Add a dish** logs something the app didn't suggest.
+- Targets follow your 12-week plan. You can change the start date in Settings.
 
 ## If the update fails
 
-The scraper was written against the FoodPro page layout but couldn't be tested live. If the Action fails or the app shows no dishes, do this:
+The scraper follows the FoodPro page layout but couldn't be tested against the live site. If the Action fails or a hall shows no dishes:
 
-1. Run **Update J2 menu** again with **Save raw pages for troubleshooting** ticked.
-2. Download the `debug-pages` artifact from the finished run.
+1. Rerun **Update dining menus** with **Save raw pages for troubleshooting** ticked.
+2. Download the `debug-pages` file from the finished run.
 3. Share it so the parsing can be fixed.

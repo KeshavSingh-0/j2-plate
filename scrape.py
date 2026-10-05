@@ -1,4 +1,4 @@
-"""Scrape J2 Dining menus and nutrition labels from UT FoodPro into data/menu.json.
+"""Scrape J2, JCL and Kins Dining menus and nutrition labels from UT FoodPro into data/menu.json.
 
 Runs daily in GitHub Actions. Keeps only vegetarian/vegan items (Veggie or Vegan icon)
 and caches nutrition labels by recipe+portion so repeat items are fetched once.
@@ -17,8 +17,17 @@ from urllib.parse import urljoin, parse_qs, urlparse
 import requests
 
 BASE = "https://hf-foodpro.austin.utexas.edu/foodpro/"
-START = (BASE + "shortmenu.aspx?sName=University+Housing+and+Dining"
-         "&locationNum=12&locationName=J2+Dining&naFlag=1")
+# (display name, FoodPro locationNum, FoodPro locationName) — from the FoodPro location page
+LOCATIONS = [
+    ("J2 Dining", "12", "J2+Dining"),
+    ("JCL Dining", "12(a)", "JCL+Dining"),
+    ("Kins Dining", "03", "Kins+Dining"),
+]
+
+
+def start_url(num, name):
+    return (BASE + "shortmenu.aspx?sName=University+Housing+and+Dining"
+            f"&locationNum={num}&locationName={name}&naFlag=1")
 OUT = "data/menu.json"
 CACHE = "data/labels_cache.json"
 DEBUG = "--debug" in sys.argv
@@ -26,7 +35,7 @@ KEEP_DAYS_BACK = 1          # keep yesterday so late-night checks still work
 VEG_ICONS = {"veggie", "vegan"}
 
 S = requests.Session()
-S.headers["User-Agent"] = "j2-plate personal meal planner (student project)"
+S.headers["User-Agent"] = "ut-plate personal meal planner (student project)"
 
 
 def get(url):
@@ -94,7 +103,7 @@ def parse_longmenu(page):
                 station = name
             else:
                 break
-        items.append({"rec": rec, "name": text_of(a.group(2)), "station": station,
+        items.append({"rec": rec, "href": urljoin(BASE, href), "name": text_of(a.group(2)), "station": station,
                       "icons": sorted(icons)})
     return items
 
@@ -137,43 +146,49 @@ def main():
     cache = json.load(open(CACHE)) if os.path.exists(CACHE) else {}
     old = json.load(open(OUT)) if os.path.exists(OUT) else {"days": {}, "items": {}}
 
-    start = get(START)
-    save_debug("shortmenu.html", start)
-    date_links = list(dict.fromkeys(l for l in links(start, "dtdate=") if "shortmenu.aspx" in l))
-    print(f"found {len(date_links)} dates")
-
     days, items = {}, {}
-    for dl in date_links:
-        day_page = get(dl)
-        iso = to_iso(qs(dl, "dtdate"))
-        meals = list(dict.fromkeys(links(day_page, "longmenu.aspx")))
-        days[iso] = {}
-        for ml in meals:
-            meal = qs(ml, "mealName") or "Meal"
-            page = get(ml)
-            save_debug(f"{iso}_{meal}.html", page)
-            entries = []
-            for it in parse_longmenu(page):
-                if not VEG_ICONS & set(it["icons"]):
-                    continue
-                rec = it["rec"]
-                if rec not in cache or not cache[rec].get("ok"):
-                    url = (BASE + "label.aspx?locationNum=12&locationName=J2+Dining&dtdate="
-                           + qs(ml, "dtdate").replace("/", "%2f") + "&RecNumAndPort=" + rec.replace("/", "%2f"))
-                    lab = get(url)
-                    if DEBUG and len(cache) < 3:
-                        save_debug(f"label_{rec.replace('*', '_').replace('/', '-')}.html", lab)
-                    cache[rec] = parse_label(lab)
-                items[rec] = {"name": it["name"], "icons": it["icons"], **cache[rec]}
-                entries.append({"id": rec, "station": it["station"]})
-            days[iso][meal] = entries
-            print(f"{iso} {meal}: {len(entries)} vegetarian items")
+    for loc, num, name in LOCATIONS:
+        try:
+            start = get(start_url(num, name))
+        except RuntimeError as e:
+            print(f"skipping {loc}: {e}")
+            continue
+        save_debug(f"{num}_shortmenu.html", start)
+        date_links = list(dict.fromkeys(l for l in links(start, "dtdate=") if "shortmenu.aspx" in l))
+        print(f"{loc}: found {len(date_links)} dates")
+        for dl in date_links:
+            day_page = get(dl)
+            iso = to_iso(qs(dl, "dtdate"))
+            meals = list(dict.fromkeys(links(day_page, "longmenu.aspx")))
+            for ml in meals:
+                meal = qs(ml, "mealName") or "Meal"
+                page = get(ml)
+                save_debug(f"{num}_{iso}_{meal}.html", page)
+                entries = []
+                for it in parse_longmenu(page):
+                    if not VEG_ICONS & set(it["icons"]):
+                        continue
+                    rec = it["rec"]
+                    if rec not in cache or not cache[rec].get("ok"):
+                        lab = get(it["href"])
+                        if DEBUG and len(cache) < 3:
+                            save_debug(f"label_{rec.replace('*', '_').replace('/', '-')}.html", lab)
+                        cache[rec] = parse_label(lab)
+                    items[rec] = {"name": it["name"], "icons": it["icons"], **cache[rec]}
+                    entries.append({"id": rec, "station": it["station"]})
+                if entries:
+                    days.setdefault(iso, {}).setdefault(loc, {})[meal] = entries
+                print(f"{iso} {loc} {meal}: {len(entries)} vegetarian items")
 
     # keep yesterday's data if the site already rolled it off
     cutoff = (datetime.now(timezone.utc).date() - timedelta(days=KEEP_DAYS_BACK)).isoformat()
-    for iso, meals in old.get("days", {}).items():
-        if iso not in days and iso >= cutoff:
-            days[iso] = meals
+    for iso, halls in old.get("days", {}).items():
+        if iso in days or iso < cutoff or not isinstance(halls, dict):
+            continue
+        for loc, meals in halls.items():
+            if not isinstance(meals, dict):
+                continue
+            days.setdefault(iso, {})[loc] = meals
             for m in meals.values():
                 for e in m:
                     if e["id"] in old.get("items", {}):
@@ -182,7 +197,7 @@ def main():
     if not items:
         raise SystemExit("No items parsed — run with --debug and check debug/*.html")
     out = {"updated": datetime.now(timezone.utc).isoformat(timespec="minutes"),
-           "location": "J2 Dining",
+           "locations": [l[0] for l in LOCATIONS],
            "nutrients": [k for k, _ in NUTRIENTS],
            "days": dict(sorted(days.items())), "items": items}
     json.dump(out, open(OUT, "w"), separators=(",", ":"))
